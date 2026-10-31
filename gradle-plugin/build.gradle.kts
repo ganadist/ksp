@@ -28,6 +28,8 @@ dependencies {
     compileOnly(libs.kotlin.stdlib)
     implementation(project(":api"))
     implementation(project(":common-deps"))
+    testImplementation(libs.kotlin.buildToolsApi)
+    testImplementation(libs.kotlin.gradlePluginApi)
     testImplementation(gradleApi())
     testImplementation(project(":api"))
     testImplementation(libs.junit4)
