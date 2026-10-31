@@ -32,6 +32,7 @@ import com.google.devtools.ksp.processing.KSPJsConfig
 import com.google.devtools.ksp.processing.KSPJvmConfig
 import com.google.devtools.ksp.processing.KSPNativeConfig
 import com.google.devtools.ksp.processing.KspGradleLogger
+import org.gradle.StartParameter
 import org.gradle.api.DefaultTask
 import org.gradle.api.JavaVersion
 import org.gradle.api.Project
@@ -42,6 +43,9 @@ import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.FileCollection
 import org.gradle.api.logging.LogLevel
+import org.gradle.api.logging.Logging
+import org.gradle.api.logging.configuration.WarningMode
+import org.gradle.api.model.ObjectFactory
 import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
@@ -73,6 +77,7 @@ import org.gradle.workers.WorkParameters
 import org.gradle.workers.WorkerExecutor
 import org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode
 import org.jetbrains.kotlin.gradle.dsl.KotlinJvmCompilerOptions
+import org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension
 import org.jetbrains.kotlin.gradle.plugin.KotlinCompilation
 import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 import org.jetbrains.kotlin.gradle.plugin.getKotlinPluginVersion
@@ -91,6 +96,7 @@ import java.nio.file.Paths
 import java.util.*
 import java.util.concurrent.Callable
 import javax.inject.Inject
+import javax.tools.DiagnosticListener
 
 @CacheableTask
 abstract class KspAATask @Inject constructor(
@@ -98,6 +104,24 @@ abstract class KspAATask @Inject constructor(
 ) : DefaultTask() {
     @get:Classpath
     abstract val kspClasspath: ConfigurableFileCollection
+
+    /**
+     * Compiler version used to check Build Tools API diagnostic support for this compilation.
+     *
+     * With [useBuildToolsApi] enabled, this lazily reads `kotlin.compilerVersion`, falling back to
+     * the Kotlin Gradle plugin version. Otherwise, it uses the plugin version without evaluating
+     * `kotlin.compilerVersion`.
+     *
+     * Only diagnostic reporting depends on this value, so it is [Internal].
+     */
+    @get:Internal
+    abstract val compilerVersionForDiagnostics: Property<String>
+
+    @get:Internal
+    abstract val useBuildToolsApi: Property<Boolean>
+
+    @get:Inject
+    abstract val startParameter: StartParameter
 
     @get:Nested
     abstract val kspConfig: KspGradleConfig
@@ -180,6 +204,10 @@ abstract class KspAATask @Inject constructor(
         val workerQueue = workerExecutor.noIsolation()
         workerQueue.submit(KspAAWorkerAction::class.java) {
             it.config.set(kspConfig)
+            it.taskPath.set(path)
+            it.compilerVersionForDiagnostics.set(compilerVersionForDiagnostics)
+            it.useBuildToolsApi.set(useBuildToolsApi)
+            it.warningModeAll.set(startParameter.warningMode == WarningMode.All)
             it.kspClasspath.from(kspClasspath)
             it.modifiedSources = modifiedSources
             it.removedSources = removedSources
@@ -189,6 +217,10 @@ abstract class KspAATask @Inject constructor(
 
     companion object {
         @Internal
+        @OptIn(
+            org.jetbrains.kotlin.buildtools.api.ExperimentalBuildToolsApi::class,
+            org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class,
+        )
         internal fun registerKspAATask(
             kotlinCompilation: KotlinCompilation<*>,
             kotlinCompileProvider: TaskProvider<AbstractKotlinCompileTool<*>>,
@@ -221,6 +253,21 @@ abstract class KspAATask @Inject constructor(
             }
             val incomingProcessors = processorClasspath.incoming.artifactView { }.files
             val kspTaskProvider = project.tasks.register(kspTaskName, KspAATask::class.java) { kspAATask ->
+                val kgpVersion = project.getKotlinPluginVersion()
+                val useBuildToolsApi = getUseBuildToolsApiProvider(
+                    project,
+                    kotlinCompilation.platformType,
+                    kgpVersion,
+                )
+                kspAATask.useBuildToolsApi.set(useBuildToolsApi)
+                kspAATask.compilerVersionForDiagnostics.set(
+                    compilerVersionForDiagnostics(
+                        useBuildToolsApi,
+                        project.extensions.getByType(KotlinTopLevelExtension::class.java).compilerVersion,
+                        kgpVersion,
+                        project.providers,
+                    )
+                )
                 kspAATask.usesService(isolatedClassLoaderCacheBuildServiceProvider)
                 kspAATask.isolatedClassLoaderCacheBuildService.set(isolatedClassLoaderCacheBuildServiceProvider)
                 kspAATask.kspClasspath.from(kspAADepCfg.incoming.artifactView { }.files)
@@ -502,6 +549,28 @@ abstract class KspAATask @Inject constructor(
             return kspTaskProvider
         }
 
+        private fun getUseBuildToolsApiProvider(
+            project: Project,
+            platformType: KotlinPlatformType,
+            kgpVersion: String,
+        ): Provider<Boolean> {
+            val setting = buildToolsApiSetting(platformType, kgpVersion)
+                ?: return project.provider { false }
+            val extraProperties = project.extensions.extraProperties
+            val extraValue = if (extraProperties.has(setting.property)) {
+                extraProperties.get(setting.property)?.toString()
+            } else null
+            val localProperties = project.providers.fileContents(
+                project.layout.projectDirectory.file(project.rootDir.resolve("local.properties").absolutePath)
+            ).asText
+            return buildToolsApiEnabled(
+                setting,
+                project.providers.provider { extraValue },
+                project.providers.gradleProperty(setting.property),
+                localProperties,
+            )
+        }
+
         private const val ENABLE_KLIBS_CROSSCOMPILATION_PROPERTY = "kotlin.native.enableKlibsCrossCompilation"
         private const val CROSS_COMPILATION_SHARED_DATA_KEY = "crossCompilationMetadata"
         private val KOTLIN_PROJECT_SHARED_DATA_ATTRIBUTE =
@@ -750,7 +819,11 @@ abstract class KspGradleConfig @Inject constructor() {
 }
 
 interface KspAAWorkParameter : WorkParameters {
+    val taskPath: Property<String>
     val config: Property<KspGradleConfig>
+    val compilerVersionForDiagnostics: Property<String>
+    val useBuildToolsApi: Property<Boolean>
+    val warningModeAll: Property<Boolean>
     val kspClasspath: ConfigurableFileCollection
     var modifiedSources: List<File>
     var removedSources: List<File>
@@ -760,7 +833,26 @@ interface KspAAWorkParameter : WorkParameters {
 val doNotGC = mutableSetOf<Any>()
 
 abstract class KspAAWorkerAction : WorkAction<KspAAWorkParameter> {
+    @get:Inject
+    abstract val objects: ObjectFactory
+
     override fun execute() {
+        val diagnosticReporter = KspDiagnosticReporterFactory.create(
+            parameters.compilerVersionForDiagnostics.get(),
+            parameters.useBuildToolsApi.get(),
+            objects,
+            Logging.getLogger(KspAAWorkerAction::class.java),
+            parameters.warningModeAll.get(),
+            parameters.taskPath.get(),
+        )
+        try {
+            execute(diagnosticReporter)
+        } finally {
+            diagnosticReporter?.flush()
+        }
+    }
+
+    private fun execute(diagnosticReporter: KspDiagnosticReporter?) {
         val gradleCfg = parameters.config.get()
         val kspClasspath = parameters.kspClasspath
         val isolatedClassLoaderCache = IsolatedClassLoaderCache.cache
@@ -793,7 +885,7 @@ abstract class KspAAWorkerAction : WorkAction<KspAAWorkParameter> {
             it.javaClass.name !in excludedProcessors
         }.toList()
 
-        val kspGradleLogger = KspGradleLogger(gradleCfg.logLevel.get().ordinal)
+        val kspGradleLogger = KspGradleLogger(gradleCfg.logLevel.get().ordinal, diagnosticReporter)
 
         if (processorProviders.isEmpty()) {
             kspGradleLogger.error("No providers found in processor classpath.")
@@ -879,13 +971,15 @@ abstract class KspAAWorkerAction : WorkAction<KspAAWorkParameter> {
                 "loadAndRunKSP",
                 ByteArray::class.java,
                 List::class.java,
-                Int::class.java
+                Int::class.java,
+                DiagnosticListener::class.java,
             )
             val returnCode = runMethod.invoke(
                 null,
                 byteArrayOutputStream.toByteArray(),
                 processorProviders,
-                gradleCfg.logLevel.get().ordinal
+                gradleCfg.logLevel.get().ordinal,
+                diagnosticReporter,
             ) as Int
             ExitCode.entries[returnCode]
         } catch (e: InvocationTargetException) {
