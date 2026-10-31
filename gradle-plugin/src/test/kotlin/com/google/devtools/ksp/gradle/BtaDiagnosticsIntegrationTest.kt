@@ -196,6 +196,73 @@ class BtaDiagnosticsIntegrationTest {
     }
 
     @Test
+    fun kspDiagnosticsOptOutRetainsLegacyOutputAndCompilerSelection() {
+        setup("2.4.0", "2.4.0")
+        tmpDir.root
+            .resolve("gradle.properties")
+            .appendText("\nksp.diagnostics.useBuildToolsApi=false\n")
+        val result = runner().build()
+        assertLegacyDiagnostics(result)
+        assertCompilerVersion(result, "2.4.0")
+        assertThat(result.output).contains("COMPILATION_USES_BTA=true")
+    }
+
+    @Test
+    fun kspDiagnosticsOptOutSupportsConfigurationCacheAndCommandLineOverride() {
+        setup("2.4.0", "2.4.0")
+        tmpDir.root
+            .resolve("gradle.properties")
+            .appendText("\nksp.diagnostics.useBuildToolsApi=false\n")
+        val cached =
+            runner()
+                .withArguments(
+                    ":app:classes",
+                    "--warning-mode=all",
+                    "--console=plain",
+                    "--configuration-cache",
+                    "--configuration-cache-problems=fail",
+                    "--rerun-tasks",
+                    "-Pksp.diagnostics.useBuildToolsApi=true",
+                )
+        assertDiagnostics(cached.build(), "warning", "WARNING")
+        val enabledReuse = cached.build()
+        assertThat(enabledReuse.output).contains("Reusing configuration cache.")
+        assertDiagnostics(enabledReuse, "warning", "WARNING")
+
+        tmpDir.root.resolve("build/reports/problems/problems-report.html").delete()
+        val disabledArguments =
+            cached.arguments.filterNot { it.startsWith("-Pksp.diagnostics.useBuildToolsApi=") }
+        val disabled = cached.withArguments(disabledArguments).build()
+        assertLegacyDiagnostics(disabled)
+        assertCompilerVersion(disabled, "2.4.0")
+        assertThat(disabled.output).contains("COMPILATION_USES_BTA=true")
+        val disabledReuse = cached.build()
+        assertThat(disabledReuse.output).contains("Reusing configuration cache.")
+        assertLegacyDiagnostics(disabledReuse)
+
+        write("app/src/main/java/test/ErrorTrigger.java", "package test; class ErrorTrigger {}")
+        val failed = cached.buildAndFail()
+        assertThat(failed.output).contains("Reusing configuration cache.")
+        assertThat(failed.task(":app:kspKotlin")!!.outcome).isEqualTo(TaskOutcome.FAILED)
+        assertThat(failed.output.lineSequence().count { "quiet-cache error" in it }).isEqualTo(1)
+        assertThat(problems().filter { it["contextualLabel"].toString().contains("[ksp]") })
+            .isEmpty()
+    }
+
+    @Test
+    fun kspDiagnosticsOptInDoesNotOverrideCompilerBtaOptOut() {
+        setup("2.4.0", "2.4.0")
+        tmpDir.root
+            .resolve("gradle.properties")
+            .appendText(
+                "\nkotlin.compiler.runViaBuildToolsApi=false\nksp.diagnostics.useBuildToolsApi=true\n"
+            )
+        val result = runner().build()
+        assertLegacyDiagnostics(result)
+        assertThat(result.output).contains("COMPILATION_USES_BTA=false")
+    }
+
+    @Test
     fun jvmExplicitBtaOptOutRetainsLegacyOutput() {
         setup("2.4.0", "2.4.0")
         tmpDir.root
@@ -420,6 +487,7 @@ class BtaDiagnosticsIntegrationTest {
                 })
                 doFirst {
                     println("DIAGNOSTICS_COMPILER=" + (this as KspAATask).compilerVersionForDiagnostics.get())
+                    println("COMPILATION_USES_BTA=" + (this as KspAATask).useBuildToolsApi.get())
                     println("RESOLVED_COMPILER=" + inputs.properties["resolvedCompilerVersion"])
                 }
             }
