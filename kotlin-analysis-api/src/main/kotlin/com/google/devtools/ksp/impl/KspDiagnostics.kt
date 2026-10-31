@@ -20,7 +20,12 @@
 package com.google.devtools.ksp.impl
 
 import com.google.devtools.ksp.impl.symbol.kotlin.analyze
+import com.google.devtools.ksp.impl.symbol.kotlin.toLocation
 import com.google.devtools.ksp.processing.KSPLogger
+import com.google.devtools.ksp.symbol.KSNode
+import com.google.devtools.ksp.symbol.KSVisitor
+import com.google.devtools.ksp.symbol.Location
+import com.google.devtools.ksp.symbol.Origin
 import com.intellij.psi.JavaRecursiveElementWalkingVisitor
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiErrorElement
@@ -61,7 +66,13 @@ object KspDiagnostics {
                 val diagnostics = file.collectDiagnostics(KaDiagnosticCheckerFilter.ONLY_COMMON_CHECKERS)
                 for (diagnostic in diagnostics) {
                     if (diagnostic.severity == KaSeverity.ERROR) {
-                        logger.error(diagnostic.psi.withLocation(diagnostic.defaultMessage), null)
+                        logger.error(
+                            diagnostic.defaultMessage,
+                            DiagnosticNode(
+                                diagnostic.psi.toLocation(diagnostic.textRanges.firstOrNull()?.startOffset),
+                                Origin.KOTLIN
+                            )
+                        )
                     }
                 }
             }
@@ -70,22 +81,22 @@ object KspDiagnostics {
 
     fun runJava(psiJavaFiles: Collection<PsiJavaFile>, logger: KSPLogger) {
         for (file in psiJavaFiles) {
-            val messages = linkedSetOf<String>()
+            val messages = linkedMapOf<PsiElement, String>()
 
             val syntaxErrors = PsiTreeUtil.findChildrenOfType(file, PsiErrorElement::class.java)
             if (syntaxErrors.isNotEmpty()) {
-                syntaxErrors.mapTo(messages) { it.withLocation(it.errorDescription) }
+                syntaxErrors.forEach { messages[it] = it.errorDescription }
             } else {
                 file.accept(UnresolveReferenceCollector(messages))
             }
 
-            messages.forEach { logger.error(it, null) }
+            messages.forEach { (element, message) -> logger.error(message, DiagnosticNode(element.toLocation(), Origin.JAVA)) }
         }
     }
 }
 
 class UnresolveReferenceCollector(
-    private val messages: MutableSet<String>
+    private val messages: MutableMap<PsiElement, String>
 ) : JavaRecursiveElementWalkingVisitor() {
     // Javadoc references are not resolved by the compiler, don't descend inot them.
     override fun visitDocComment(comment: PsiDocComment) = Unit
@@ -107,7 +118,7 @@ class UnresolveReferenceCollector(
     private fun PsiJavaCodeReferenceElement.getName(): String? = referenceName ?: text
 
     private fun PsiJavaCodeReferenceElement.collectIfUnresolved() = if (!this.isResolved()) {
-        messages.add((referenceNameElement ?: this).withLocation("Unresolved reference '${this.getName()}'"))
+        messages[referenceNameElement ?: this] = "Unresolved reference '${this.getName()}'"
     } else null
 
     private fun PsiJavaCodeReferenceElement.hasUnresolvedQualifier(): Boolean =
@@ -119,16 +130,8 @@ class UnresolveReferenceCollector(
         }
 }
 
-private fun PsiElement.withLocation(message: String): String {
-    val fileLoc = containingFile?.name
-    val line = containingFile?.viewProvider?.document?.getLineNumber(textOffset)?.plus(1)
-    val prefix = if (fileLoc != null && line != null) {
-        "$fileLoc:$line: "
-    } else if (fileLoc != null) {
-        "$fileLoc: "
-    } else {
-        ""
-    }
+internal class DiagnosticNode(override val location: Location, override val origin: Origin) : KSNode {
+    override val parent: KSNode? = null
 
-    return "$prefix$message"
+    override fun <D, R> accept(visitor: KSVisitor<D, R>, data: D): R = visitor.visitNode(this, data)
 }

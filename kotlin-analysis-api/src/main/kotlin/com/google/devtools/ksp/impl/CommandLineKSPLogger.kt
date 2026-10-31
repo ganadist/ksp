@@ -18,7 +18,9 @@
 package com.google.devtools.ksp.impl
 
 import com.google.devtools.ksp.processing.KSPLogger
+import com.google.devtools.ksp.symbol.FileLocation
 import com.google.devtools.ksp.symbol.KSNode
+import java.io.File
 
 class CommandLineKSPLogger : KSPLogger {
     // TODO: support logging level.
@@ -36,7 +38,12 @@ class CommandLineKSPLogger : KSPLogger {
     }
 
     override fun error(message: String, symbol: KSNode?) {
-        messager.println(message)
+        val location = (symbol as? DiagnosticNode)?.location as? FileLocation
+        if (location != null) {
+            messager.println("${File(location.filePath).name}:${location.lineNumber}: $message")
+        } else {
+            messager.println(message)
+        }
     }
 
     override fun exception(e: Throwable) {
