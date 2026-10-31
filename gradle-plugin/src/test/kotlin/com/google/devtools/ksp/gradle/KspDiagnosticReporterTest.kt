@@ -129,6 +129,28 @@ class KspDiagnosticReporterTest {
     }
 
     @Test
+    fun compilerVersionProviderIsLazyAndIgnoresOverridesWithoutBta() {
+        val project = ProjectBuilder.builder().build()
+        val override = project.objects.property(String::class.java).convention("2.4.0")
+        override.finalizeValueOnRead()
+        val enabled = project.objects.property(Boolean::class.java).convention(true)
+        val task =
+            project.tasks
+                .register("kspTest", KspAATask::class.java) {
+                    it.compilerVersionForDiagnostics.set(
+                        compilerVersionForDiagnostics(enabled, override, "2.4.0", project.providers)
+                    )
+                }
+                .get()
+        val versionForDiagnostics = task.compilerVersionForDiagnostics
+        override.set("2.3.20")
+        assertThat(versionForDiagnostics.get()).isEqualTo("2.3.20")
+        assertThat(supported(versionForDiagnostics.get())).isFalse()
+        enabled.set(false)
+        assertThat(versionForDiagnostics.get()).isEqualTo("2.4.0")
+    }
+
+    @Test
     fun problemsConsoleEmitterStartsAtGradle93() {
         for (version in listOf("8.13", "9.0", "9.2")) {
             assertThat(
