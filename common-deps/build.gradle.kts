@@ -15,6 +15,7 @@ plugins {
 
 dependencies {
     compileOnly(project(":api"))
+    testImplementation(project(":api"))
     testImplementation(libs.junit4)
 
     ksp(project(":cmdline-parser-gen"))
