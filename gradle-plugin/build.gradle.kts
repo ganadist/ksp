@@ -16,6 +16,7 @@ plugins {
 }
 
 dependencies {
+    compileOnly(libs.kotlin.buildToolsApi)
     compileOnly(libs.kotlin.gradlePluginApi)
     compileOnly(libs.kotlin.gradlePlugin)
     compileOnly(libs.kotlin.compiler.embeddable)
