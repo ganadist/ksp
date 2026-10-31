@@ -21,19 +21,23 @@ import com.google.devtools.ksp.processing.KspGradleLogger
 import com.google.devtools.ksp.processing.SymbolProcessorProvider
 import java.io.ByteArrayInputStream
 import java.io.ObjectInputStream
+import javax.tools.DiagnosticListener
+import javax.tools.JavaFileObject
 
 class KSPLoader {
     companion object {
         @JvmStatic
+        @JvmOverloads
         fun loadAndRunKSP(
             kspConfigStream: ByteArray,
             processorProvider: List<SymbolProcessorProvider>,
-            logLevel: Int
+            logLevel: Int,
+            diagnosticListener: DiagnosticListener<JavaFileObject>? = null
         ): Int {
             val kspConfig = ObjectInputStream(ByteArrayInputStream(kspConfigStream)).use { objectInputStream ->
                 objectInputStream.readObject() as KSPConfig
             }
-            val ksp = KotlinSymbolProcessing(kspConfig, processorProvider, KspGradleLogger(logLevel))
+            val ksp = KotlinSymbolProcessing(kspConfig, processorProvider, KspGradleLogger(logLevel, diagnosticListener))
             return ksp.execute().ordinal
         }
     }
